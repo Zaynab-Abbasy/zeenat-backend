@@ -1,15 +1,28 @@
-from flask import Flask, jsonify, request,url_for
+from flask import Flask, jsonify, request
+from sqlalchemy import ARRAY,Table, Column, Integer, ForeignKey,MetaData
+from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.ext.declarative import DeclarativeMeta
+
+import json
+
+Base = declarative_base()
+
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import uuid
 import secrets
-
+from sqlalchemy.orm import relationship
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from flask_mail import Mail,Message
 
+
+
 app = Flask(__name__)
+
 CORS(app)
+metadata = MetaData()
 app.secret_key = 'SECRET_KEY'
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:pakistan@localhost/Zeenat'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -35,6 +48,43 @@ class User(db.Model):
     name = db.Column(db.String(100), nullable=False)
     reset_token = db.Column(db.String(255), nullable=True)
 
+# Define Category model
+class Category(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    parent = db.Column(db.String(100), nullable=False)
+    products = db.Column(ARRAY(db.String), nullable=True)
+    img = db.Column(db.String(255), nullable=True,default='default_image1.jpg')
+    type = db.Column(db.String(50), nullable=False) 
+
+    def __repr__(self):
+        return f"<Category {self.parent}>"
+    
+
+    
+
+    
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    img = db.Column(db.String(255))
+    category_id = db.Column(db.Integer, db.ForeignKey('category.id'))
+    title = db.Column(db.String(255))
+    description = db.Column(db.Text)
+    imageURLs = db.Column(db.Text)
+    price = db.Column(db.Float)
+    discount = db.Column(db.Float)
+    status = db.Column(db.String(50))
+    tags = db.Column(ARRAY(db.String))
+    category = db.relationship('Category', backref='associated_products')
+    type = db.Column(db.String(50))
+    
+        
+    
+
+    
+
+     
+    
+    
 # Signup endpoint
 @app.route('/user/signup', methods=['POST'])
 def signup():
@@ -130,30 +180,171 @@ def confirm_forgot_password():
 
     return jsonify({'message': 'Password reset successfully'}), 200
 
-# Reset password endpoint
-@app.route('/user/reset-password', methods=['POST'])
-def reset_password():
-    data = request.json
-    token = data.get('token')
-    new_password = data.get('newPassword')
 
-    user = User.query.filter_by(reset_token=token).first()
-    if not user:
-        return jsonify({'error': 'Invalid token'}), 400
 
-    # Hash the new password
-    hashed_password = generate_password_hash(new_password)
-    user.password = hashed_password
-    user.reset_token = None
-    db.session.commit()
-    app.logger.info('Password reset successfully')
+@app.route('/showCategory')
+def show_category():
+    categories = Category.query.all()
+    categories_data = [{'id': category.id, 'parent': category.parent, 'products': category.products} for category in categories]
+    return jsonify({'result': categories_data})
 
-    return jsonify({'message': 'Password reset successfully'}), 200
+@app.route('/categoryshow/<type>')
+def get_category_by_type(type):
+    categories = Category.query.filter_by(type=type).all()
+    categories_data = [{'id': category.id, 'parent': category.parent, 'products': category.products, 'img': category.img} for category in categories]
+    return jsonify({'result': categories_data})
 
+import json
+
+
+@app.route('/productall')
+def get_all_products():
+    print("Query string", request.query_string)
+    print("Request URL:", request.url)
+
+    category_name = request.args.get('category', default=None)
+    print('Category Filter:', category_name)
     
+    color_filter = request.args.get('color', default=None)
+    print('Color Filter:', color_filter)
+    
+    if category_name:
+        # Filter products based on the category
+        products = Product.query.join(Category).filter(Category.parent == category_name).all()
+    else:
+        # If no category is specified, retrieve all products
+        products = Product.query.all()
+
+    serialized_products = []
+
+    for product in products:
+        print('Product ID:', product.id)
+        print('Image URLs:', product.imageURLs)
+        # Serialize product data
+        serialized_product = {
+            'id': product.id,
+            'img': product.img,
+            'category': product.category.parent if product.category else None,
+            'title': product.title,
+            'price': product.price,
+            'discount': product.discount,
+            'status': product.status,
+            'imageURLs': product.imageURLs,
+            'tags': product.tags,
+            'colors': []  # Initialize an empty list for colors
+            # Add more attributes as needed
+        }
+        
+        # Apply color filtering if color_filter is provided
+        if color_filter:
+            # Check if any of the product's imageURLs match the color filter
+            for img_data in json.loads(product.imageURLs):
+                if isinstance(img_data, dict) and 'color' in img_data and img_data['color']['name'].lower() == color_filter.lower():
+                    color_name = img_data['color']['name']
+                    # If match found, append the color to the serialized product
+                    serialized_product['colors'].append({'name': color_name})
+
+        # Remove duplicate colors
+        unique_colors = []
+        for color in serialized_product['colors']:
+            if color not in unique_colors:
+                unique_colors.append(color)
+        serialized_product['colors'] = unique_colors
+
+        # Append the serialized product to the list
+        serialized_products.append(serialized_product)
+
+    return jsonify({'data': serialized_products})
+
+
+
+from flask import request
+
+@app.route('/getproductbytype/<product_type>', methods=['GET'])
+def get_products(product_type):
+    # Get the query parameters
+    query_params = request.args
+    print("query",query_params)
+
+    # Extract the 'query' parameter
+    query = query_params.get('query')
+
+    # Extract the 'topSellers' parameter
+    top_sellers_param = query_params.get('query')
+
+    # Query products based on the product type
+    products = Product.query.filter_by(type=product_type).all()
+    
+    # Filter products based on the query parameter and product status
+    if top_sellers_param == 'topSellers=true':
+     products = Product.query.filter_by(status='top seller')
+
+    # Convert products to JSON format
+    products_json = [{
+        'id': product.id,
+        'img': product.img,
+        'category_id': product.category_id,
+        'title': product.title,
+        'description': product.description,
+        'imageURLs': product.imageURLs,
+        'price': product.price,
+        'discount': product.discount,
+        'status': product.status,
+        'tags': product.tags
+    } for product in products]
+
+    # Return JSON response
+    return jsonify({'data': products_json})
+
+
+
+
+
+
+
+
+
+
+
+
+@app.route('/productdetails/<int:product_id>', methods=['GET'])
+def get_product(product_id):
+    print("product details:", product_id)
+    product = Product.query.filter_by(id=product_id).first()
+
+    # Check if the product exists
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    category_parent = product.category.parent if product.category and hasattr(product.category, 'parent') else None
+   
+
+    product_json = {
+        'id': product.id,
+        'img': product.img,
+        'category_id': product.category_id,
+        'title': product.title,
+        'description': product.description,
+        'imageURLs': product.imageURLs,
+        'price': product.price,
+        'discount': product.discount,
+        'status': product.status,
+        'tags': product.tags,
+        'category': category_parent
+    }
+
+    # Return JSON response
+    return jsonify(product_json)
+
+
+
+
+
 @app.route('/')
 def index():
     return 'hello world'
 
 if __name__ == '__main__':
-     app.run(debug=True)
+    with app.app_context():
+        db.create_all()
+    app.run(debug=True)
+
