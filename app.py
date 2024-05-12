@@ -17,7 +17,7 @@ from sqlalchemy.orm import relationship
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from flask_mail import Mail,Message
-
+from datetime import datetime
 
 
 app = Flask(__name__)
@@ -47,6 +47,9 @@ class User(db.Model):
     email = db.Column(db.String(100), unique=True, nullable=False)
     password = db.Column(db.String(255), nullable=False)
     name = db.Column(db.String(100), nullable=False)
+    phone = db.Column(db.String(20))
+    address = db.Column(db.String(255))
+    bio = db.Column(db.Text())
     reset_token = db.Column(db.String(255), nullable=True)
 
 
@@ -80,6 +83,7 @@ class Product(db.Model):
     category = db.relationship('Category', backref='associated_products')
     type = db.Column(db.String(50))
     reviews = db.relationship('Review', backref='review_product', lazy=True)
+    quantity = db.Column(db.Integer, default=0)
 
 #review model     
 class Review(db.Model):
@@ -97,7 +101,32 @@ class Coupon(db.Model):
     coupon_code = db.Column(db.String(20), nullable=False, unique=True)
     minimum_amount = db.Column(db.Float, nullable=False)
     end_time = db.Column(db.DateTime, nullable=False)
-    logo = db.Column(db.String(100))   
+    logo = db.Column(db.String(100))
+
+class Order(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    address = db.Column(db.String(200), nullable=False)
+    contact = db.Column(db.String(20), nullable=False)
+    email = db.Column(db.String(100), nullable=False)
+    city = db.Column(db.String(50), nullable=False)
+    country = db.Column(db.String(50), nullable=False)
+    zip_code = db.Column(db.String(20), nullable=False)
+    shipping_option = db.Column(db.String(50), nullable=False)
+    status = db.Column(db.String(50), default='Pending')
+    subtotal = db.Column(db.Float, nullable=False)
+    shipping_cost = db.Column(db.Float, nullable=False)
+    discount = db.Column(db.Float, nullable=False)
+    total_amount = db.Column(db.Float, nullable=False)
+    order_note = db.Column(db.Text)
+    payment_method = db.Column(db.String(50), nullable=False)
+    cart = db.Column(db.Text, nullable=False)
+    invoice = db.Column(db.Text, nullable=True,default='00000')
+    user = db.Column(db.String, nullable=False)
+   
+    #user = db.Column(db.String(200), nullable=False)
+    def __repr__(self):
+        return f"Order('{self.name}', '{self.email}')" 
 
      
     
@@ -137,8 +166,13 @@ def login():
     # Check if user exists and password is correct
     if user and check_password_hash(user.password, password):
         # Create access token
+        # Create access token
         accessToken = create_access_token(identity=user.id)
-        return jsonify({'accessToken': accessToken, 'user': {'id': user.id, 'email': user.email, 'name': user.name}}), 200
+        response_data = {
+            'accessToken': accessToken,
+            'user': {'id': user.id, 'email': user.email, 'name': user.name,'accessToken':accessToken,'phone': user.phone,'address': user.address,'bio': user.bio,}
+        }
+        return jsonify({'data': response_data}), 200
         
     else:
         app.logger.error(f'Login failed for email: {email}')
@@ -211,7 +245,7 @@ def get_category_by_type(type):
     categories_data = [{'id': category.id, 'parent': category.parent, 'products': category.products, 'img': category.img} for category in categories]
     return jsonify({'result': categories_data})
 
-import json
+
 
 #all products plus category based products
 @app.route('/productall')
@@ -350,9 +384,9 @@ def get_product(product_id):
             'userId'  :review.userId,
             'user_name': None 
         }
-    user = User.query.filter_by(id=review.userId).first()
-    if user:
-        review_data['user_name'] = user.name
+        user = User.query.filter_by(id=review.userId).first()
+        if user:
+         review_data['user_name'] = user.name
 
         reviews.append(review_data)
 
@@ -413,11 +447,183 @@ def get_coupons():
         'endTime': coupon.end_time.strftime('%Y-%m-%d %H:%M:%S'),
         'logo': coupon.logo
     } for coupon in coupons]
-    return jsonify(coupon_data)
+    return jsonify({'data':coupon_data})
+
+#save order
+
+
+
+@app.route('/saveOrder', methods=['POST'])
+def save_order():
+    data = request.json
+    cart_json = json.dumps(data['cart'])
+    # Store all details directly from the request JSON
+    order = Order(
+        name=data.get('name'),
+        address=data.get('address'),
+        contact=data.get('contact'),
+        email=data.get('email'),
+        city=data.get('city'),
+        country=data.get('country'),
+        zip_code=data.get('zipCode'),
+        shipping_option=data.get('shippingOption'),
+        subtotal=data.get('subTotal'),
+        shipping_cost=data.get('shippingCost'),
+        discount=data.get('discount'),
+        total_amount=data.get('totalAmount'),
+        order_note=data.get('orderNote'),
+        payment_method=data.get('paymentMethod'),
+        cart =cart_json,  # Assuming 'cart' contains the cart items data
+        invoice = datetime.now().strftime("%Y%m%d%H%M%S") + '-' + str(uuid.uuid4())[:8],
+        user=data.get('user') 
+    )
+
+    db.session.add(order)
+    db.session.commit()
+    print("Order ID:", order.id)
+    response_data = {
+        "data": {
+            "order": {
+                "id": order.id
+            }
+        },
+        "message": "Order saved successfully"
+    }
+    print("Order ID final:", response_data)
+     # Return response with order ID
+    return jsonify(response_data), 200
 
 
 
 
+#get user order by id 
+
+@app.route('/user-order/<int:order_id>', methods=['GET'])
+def get_user_order(order_id):
+    print("order details:", order_id)
+    order = Order.query.filter_by(id=order_id).first()
+    
+    if order:
+        order_data = {
+            'id': order.id,
+            'name': order.name,
+            'address': order.address,
+            'contact': order.contact,
+            'email': order.email,
+            'city': order.city,
+            'country': order.country,
+            'zip_code': order.zip_code,
+            'shipping_option': order.shipping_option,
+            'status': order.status,
+            'subtotal': order.subtotal,
+            'shipping_cost': order.shipping_cost,
+            'discount': order.discount,
+            'total_amount': order.total_amount,
+            'order_note': order.order_note,
+            'payment_method': order.payment_method,
+            'cart': order.cart 
+        }
+        return jsonify({ 'data': order_data}), 200
+    else:
+        return jsonify({'message': 'Order not found'}), 404
+
+
+#update profile
+@app.route('/user/update-profile/<string:id>', methods=['PUT'])
+def update_profile(id):
+    
+        user = User.query.get(id)
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        data = request.json
+        user.name = data.get('name', user.name)
+        user.email = data.get('email', user.email)
+        user.phone = data.get('phone', user.phone)
+        user.address = data.get('address', user.address)
+        user.bio = data.get('bio', user.bio)
+        
+        db.session.commit()
+        return jsonify({'message': 'User profile updated successfully'}), 200
+ #change password user    
+
+# Endpoint for changing password
+# Endpoint for changing password
+@app.route('/user/reset-password', methods=['POST'])
+def reset_password():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    new_password = data.get('newPassword')
+
+    # Find the user by email
+    user = User.query.filter_by(email=email).first()
+
+    # Check if user exists and password is correct
+    if user and check_password_hash(user.password, password):
+        # Update user's password
+        user.password = generate_password_hash(new_password)
+        db.session.commit()
+        return jsonify({'message': 'Password updated successfully'}), 200
+    else:
+        return jsonify({'error': 'Invalid email or password'}), 401
+
+#get user orders 
+# Route for fetching user orders
+
+@app.route('/user-orders')
+def get_user_orders():
+    # Retrieve orders from the database
+    orders = Order.query.all()
+    # Convert orders to a list of dictionaries
+    orders_list = []
+    for order in orders:
+        order_data = {
+            'id': order.id,
+            'name': order.name,
+            'address': order.address,
+            'contact': order.contact,
+            'email': order.email,
+            'city': order.city,
+            'country': order.country,
+            'total_amount': order.total_amount,
+            'payment_method': order.payment_method,
+            'user_id': order.user,
+            'status' :order.status
+        }
+        orders_list.append(order_data)
+    return jsonify({'data':orders_list})
+
+
+#product review 
+# Endpoint to handle adding a review
+@app.route('/add-review', methods=['POST'])
+def add_review():
+    data = request.json
+    
+    # Extract data from the request
+    userId = data.get('userId')
+    productId = data.get('productId')
+    rating = data.get('rating')
+    comment = data.get('comment')
+    
+    # Validate required fields
+    if not userId or not productId  or not rating or  not comment:
+        return jsonify({'error': 'Missing data'}), 400
+    
+    # Create a new Review instance
+    new_review = Review(
+        product_id=productId,
+        rating=rating,
+        comment=comment,
+        userId=userId
+    )
+    
+    # Add the new review to the database session
+    db.session.add(new_review)
+    db.session.commit()
+    
+    return jsonify({'message': 'Review added successfully'}), 200
 @app.route('/')
 def index():
     return 'hello world'
