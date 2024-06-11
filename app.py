@@ -3,7 +3,9 @@ from sqlalchemy import ARRAY,Table, Column, Integer, ForeignKey,MetaData,func
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime, timedelta
-from sqlalchemy import func
+from sqlalchemy import func,extract
+from flask_restful import Resource,Api
+from datetime import datetime, date
 
 import json
 
@@ -40,7 +42,7 @@ app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
 db = SQLAlchemy(app)
 mail = Mail(app)
 jwt = JWTManager(app)
-
+api = Api(app)
 # User model
 class User(db.Model):
     id = db.Column(db.String(255), primary_key=True)  # Use UUID as primary key
@@ -60,6 +62,7 @@ class Category(db.Model):
     parent = db.Column(db.String(100), nullable=False)
     products = db.Column(ARRAY(db.String), nullable=True)
     img = db.Column(db.String(255), nullable=True,default='default_image1.jpg')
+    children = db.Column(db.ARRAY(db.String), nullable=True)
     type = db.Column(db.String(50), nullable=False) 
 
     def __repr__(self):
@@ -123,6 +126,7 @@ class Order(db.Model):
     cart = db.Column(db.Text, nullable=False)
     invoice = db.Column(db.Text, nullable=True,default='00000')
     user = db.Column(db.String, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
    
     #user = db.Column(db.String(200), nullable=False)
     def __repr__(self):
@@ -236,18 +240,17 @@ def confirm_forgot_password():
 @app.route('/showCategory')
 def show_category():
     categories = Category.query.all()
-    categories_data = [{'id': category.id, 'parent': category.parent, 'products': category.products} for category in categories]
+    categories_data = [{'id': category.id, 'parent': category.parent, 'children': category.children, 'products': category.products} for category in categories]
     return jsonify({'result': categories_data})
 #get category wise products
 @app.route('/categoryshow/<type>')
 def get_category_by_type(type):
     categories = Category.query.filter_by(type=type).all()
-    categories_data = [{'id': category.id, 'parent': category.parent, 'products': category.products, 'img': category.img} for category in categories]
+    categories_data = [{'id': category.id, 'parent': category.parent, 'children': category.children, 'products': category.products, 'img': category.img} for category in categories]
     return jsonify({'result': categories_data})
 
 
 
-#all products plus category based products
 @app.route('/productall')
 def get_all_products():
     print("Query string", request.query_string)
@@ -256,12 +259,24 @@ def get_all_products():
     category_name = request.args.get('category', default=None)
     print('Category Filter:', category_name)
     
+    subcategory_name = request.args.get('subCategory', default=None)
+    print('SubCategory Filter:', subcategory_name)
+    
     color_filter = request.args.get('color', default=None)
     print('Color Filter:', color_filter)
-    
+
     if category_name:
-        # Filter products based on the category
-        products = Product.query.join(Category).filter(Category.parent == category_name).all()
+        if subcategory_name:
+            # Filter products based on the category and subcategory
+            products = Product.query.join(Category).filter(
+                Category.parent == category_name,
+                Category.children.contains([subcategory_name])
+            ).all()
+        else:
+            # Filter products based on the category only
+            products = Product.query.join(Category).filter(
+                Category.parent == category_name
+            ).all()
     else:
         # If no category is specified, retrieve all products
         products = Product.query.all()
@@ -288,12 +303,14 @@ def get_all_products():
         
         # Apply color filtering if color_filter is provided
         if color_filter:
-            # Check if any of the product's imageURLs match the color filter
-            for img_data in json.loads(product.imageURLs):
-                if isinstance(img_data, dict) and 'color' in img_data and img_data['color']['name'].lower() == color_filter.lower():
-                    color_name = img_data['color']['name']
-                    # If match found, append the color to the serialized product
-                    serialized_product['colors'].append({'name': color_name})
+            # Filter products based on the color provided
+            products = [
+                product for product in products if any(
+                    img_data.get('color', {}).get('name', '').lower() == color_filter.lower()
+                    for img_data in json.loads(product.imageURLs)
+                )
+            ]
+            print('Filtered Products:', products)
 
         # Remove duplicate colors
         unique_colors = []
@@ -301,11 +318,14 @@ def get_all_products():
             if color not in unique_colors:
                 unique_colors.append(color)
         serialized_product['colors'] = unique_colors
-
+        print('Serialized Products:', serialized_products)
         # Append the serialized product to the list
         serialized_products.append(serialized_product)
-
+        
     return jsonify({'data': serialized_products})
+
+
+
 
 
 
@@ -547,7 +567,7 @@ def update_profile(id):
         return jsonify({'message': 'User profile updated successfully'}), 200
  #change password user    
 
-# Endpoint for changing password
+
 # Endpoint for changing password
 @app.route('/user/reset-password', methods=['POST'])
 def reset_password():
@@ -622,8 +642,185 @@ def add_review():
     # Add the new review to the database session
     db.session.add(new_review)
     db.session.commit()
-    
     return jsonify({'message': 'Review added successfully'}), 200
+ 
+ 
+ ############ ADMIN PANNEL 
+ #get products
+@app.route('/admingetproducts', methods=['GET'])
+def get_adminproducts():
+    products = Product.query.all()
+    products_list = []
+    for product in products:
+        # Calculate average rating
+        if product.reviews:
+            average_rating = sum(review.rating for review in product.reviews) / len(product.reviews)
+        else:
+            average_rating = None  # or set to 0 or any default value if no reviews
+
+        products_list.append({
+            'id': product.id,
+            'name': product.title,
+            'description': product.description,
+            'price': product.price,
+            'rating': average_rating,
+            'category': product.category.parent,  # Assuming you have a title field in Category
+            'quantity': product.quantity,
+            'discount': product.discount,
+        })
+    return jsonify({'data': products_list})
+
+#get customers
+
+@app.route('/client/customers', methods=['GET'])
+def get_customers():
+    # Query orders and include relevant customer information
+    orders_with_customer_info = Order.query.all()
+    
+    customers_list = [{
+        'id': order.user,
+        'name': order.name,
+        'email': order.email,
+        'contact': order.contact,
+        'country': order.country,
+        
+        # Add any other fields you need from the Order table
+    } for order in orders_with_customer_info]
+    print (customers_list)
+
+    return jsonify({'data':customers_list})
+ 
+
+
+@app.route('/client/orders', methods=['GET'])
+def get_orders():
+    # Query all orders
+    orders = Order.query.all()
+
+    # Extract order information
+    orders_list = [{
+        'id': order.id,
+        'name': order.name,
+        'email': order.email,
+        'contact': order.contact,
+        'address': order.address,
+        'city': order.city,
+        'country': order.country,
+        'zip_code': order.zip_code,
+        'shipping_option': order.shipping_option,
+        'status': order.status,
+        'subtotal': order.subtotal,
+        'shipping_cost': order.shipping_cost,
+        'discount': order.discount,
+        'total_amount': order.total_amount,
+        'order_note': order.order_note,
+        'payment_method': order.payment_method,
+        'cart': order.cart,
+        'invoice': order.invoice,
+        'user': order.user
+        # Add any other fields you need from the Order table
+    } for order in orders]
+
+    # Return orders data as JSON
+    return jsonify({'data':orders_list})
+ 
+ 
+@app.route('/dashboard', methods=['GET'])
+def get_dashboard_data():
+    # Count total distinct customers who have placed orders
+    total_customers = db.session.query(func.count(func.distinct(Order.user))).scalar()
+
+    # Get today's date
+    today = date.today()
+    
+    # Calculate today's sales
+    today_sales = db.session.query(func.sum(Order.total_amount)).filter(
+        extract('year', Order.created_at) == today.year,
+        extract('month', Order.created_at) == today.month,
+        extract('day', Order.created_at) == today.day
+    ).scalar() or 0
+
+    # Calculate monthly sales
+    start_of_month = today.replace(day=1)
+    monthly_sales = db.session.query(func.sum(Order.total_amount)).filter(
+        Order.created_at >= start_of_month
+    ).scalar() or 0
+
+    # Calculate yearly sales
+    start_of_year = today.replace(month=1, day=1)
+    yearly_sales = db.session.query(func.sum(Order.total_amount)).filter(
+        Order.created_at >= start_of_year
+    ).scalar() or 0
+
+    # Get all transactions and format the data
+    transactions = Order.query.all()
+    transactions_data = [
+        {
+            "_id": order.id,
+            "userId": order.user,
+            "createdAt": order.created_at.strftime('%Y-%m-%d %H:%M:%S'),  # Format date
+            "products": order.cart,  # Assuming this is a JSON field or needs parsing
+            "cost": order.total_amount
+        } for order in transactions
+    ]
+
+    # Prepare the data to be sent in the response
+    data = {
+        "totalCustomers": total_customers,
+        "todayStats": {
+            "totalSales": today_sales
+        },
+        "thisMonthStats": {
+            "totalSales": monthly_sales
+        },
+        "yearlySalesTotal": yearly_sales,
+        "transactions": transactions_data
+    }
+
+    # Return the data as a JSON response
+    return jsonify(data)
+    
+
+
+
+@app.route('/add-product', methods=['POST'])
+def add_product():
+    data = request.form
+    files = request.files.getlist('product_images')
+
+    # Parse imageURLs JSON string into a Python list
+    image_urls = json.loads(data.get('imageURLs'))
+
+    # You may need to adjust the way you handle colors and image URLs here
+    # For example, you could loop through each image URL object and store them separately in the database
+    for image in image_urls:
+        url = image['url']
+        color_name = image['color']['name']
+        clr_code = image['color']['clrCode']
+        # Store the image URL, color name, and color code in the database as required
+
+    # Store the default image URL
+    default_img_url = data.get('img')
+
+    # Proceed with storing other product data in the database
+    product = Product(
+        title=data.get('title'),
+        description=data.get('description'),
+        price=float(data.get('price')),
+        discount=float(data.get('discount')),
+        status=data.get('status'),
+        tags=data.get('tags'),
+        type=data.get('type'),
+        quantity=int(data.get('quantity')),
+        category_id=int(data.get('category_id')),
+        imageURLs=json.dumps(image_urls),  # Store imageURLs as JSON string
+        img=default_img_url  # Store default image URL
+    )
+
+    db.session.add(product)
+    db.session.commit()
+
+    return jsonify({'message': 'Product added successfully'}), 201   
 @app.route('/')
 def index():
     return 'hello world'
