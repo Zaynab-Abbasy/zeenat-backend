@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func,extract
 from flask_restful import Resource,Api
 from datetime import datetime, date
+import requests
 
 import json
 
@@ -53,12 +54,14 @@ class User(db.Model):
     address = db.Column(db.String(255))
     bio = db.Column(db.Text())
     reset_token = db.Column(db.String(255), nullable=True)
+    city = db.Column(db.String(255), nullable=True)
+    country = db.Column(db.String(255), nullable=True)
 
 
 
 # Define Category model
 class Category(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
+    id = db.Column(db.Integer, primary_key=True,autoincrement=True)
     parent = db.Column(db.String(100), nullable=False)
     products = db.Column(ARRAY(db.String), nullable=True)
     img = db.Column(db.String(255), nullable=True,default='default_image1.jpg')
@@ -95,6 +98,15 @@ class Review(db.Model):
     rating = db.Column(db.Integer)  # Rating out of 5, for example
     comment = db.Column(db.Text)
     userId=db.Column(db.String, db.ForeignKey('user.id'), nullable=False)
+    def serialize(self):
+        """Serialize object data to JSON"""
+        return {
+            'id': self.id,
+            'product_id': self.product_id,
+            'rating': self.rating,
+            'comment': self.comment,
+            'user_id': self.userId
+        }
 
 # Define Coupon model
 class Coupon(db.Model):
@@ -105,6 +117,17 @@ class Coupon(db.Model):
     minimum_amount = db.Column(db.Float, nullable=False)
     end_time = db.Column(db.DateTime, nullable=False)
     logo = db.Column(db.String(100))
+    
+    def serialize(self):
+        return {
+            'id': self.id,
+            'title': self.title,
+            'discount_percentage': self.discount_percentage,
+            'coupon_code': self.coupon_code,
+            'minimum_amount': self.minimum_amount,
+            'end_time': self.end_time.strftime('%Y-%m-%d %H:%M:%S') if self.end_time else None,
+            'logo': self.logo
+        }
 
 class Order(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -658,17 +681,27 @@ def get_adminproducts():
         else:
             average_rating = None  # or set to 0 or any default value if no reviews
 
+        # Prepare reviews list
+        reviews_list = [{'comment': review.comment, 'rating': review.rating} for review in product.reviews]
+
         products_list.append({
             'id': product.id,
-            'name': product.title,
+            'title': product.title,
             'description': product.description,
             'price': product.price,
             'rating': average_rating,
-            'category': product.category.parent,  # Assuming you have a title field in Category
+            'category': product.category.parent if product.category else None,  # Assuming you have a title field in Category
             'quantity': product.quantity,
             'discount': product.discount,
+            'status': product.status,
+            'img': product.img,
+            'reviews': reviews_list,  # Serialize reviews properly
+            'tags': product.tags,
+            'type': product.type,
+            'imageURLs': product.imageURLs,
         })
     return jsonify({'data': products_list})
+
 
 #get customers
 
@@ -821,6 +854,251 @@ def add_product():
     db.session.commit()
 
     return jsonify({'message': 'Product added successfully'}), 201   
+
+#update product 
+
+# Update Product endpoint
+import logging
+
+# Configure logging to output to console
+logging.basicConfig(level=logging.DEBUG)
+
+@app.route('/updateProduct/<int:product_id>', methods=['PUT'])
+def update_product(product_id):
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid JSON data'}), 400
+        
+        product = Product.query.get(product_id)
+        if not product:
+            return jsonify({'error': 'Product not found'}), 404
+        
+        logging.debug(f"Updating product with ID: {product_id}")
+        logging.debug(f"Received data: {data}")
+
+        # Update each attribute individually
+        product.img = data.get('img', product.img)
+        product.category_id = data.get('category', product.category)
+        product.title = data.get('title', product.title)
+        product.description = data.get('description', product.description)
+        product.imageURLs = data.get('imageURLs', product.imageURLs)
+        product.price = float(data.get('price', product.price))  # Example: Convert to float if price is expected as a number
+        product.discount = float(data.get('discount', product.discount))  # Example: Convert to float if discount is expected as a number
+        product.status = data.get('status', product.status)
+        product.tags = data.get('tags', product.tags)
+        product.type = data.get('type', product.type)
+        product.quantity = int(data.get('quantity', product.quantity))  # Example: Convert to int if quantity is expected as a number
+        
+        
+
+        db.session.commit()
+        logging.debug("Product updated successfully")
+        return jsonify({'message': 'Product updated successfully'})
+    
+    except ValueError as ve:
+        logging.error(f"ValueError occurred: {ve}")
+        db.session.rollback()  # Rollback database changes
+        return jsonify({'error': str(ve)}), 400  # Return 400 Bad Request with error message
+    
+    except Exception as e:
+        logging.error(f"Exception occurred: {e}")
+        db.session.rollback()  # Rollback database changes
+        return jsonify({'error': str(e)}), 500  # Return 500 Internal Server Error
+
+
+# Delete Product endpoint
+@app.route('/deleteProduct/<int:product_id>', methods=['DELETE'])
+def delete_product(product_id):
+    product = Product.query.get(product_id)
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    db.session.delete(product)
+    db.session.commit()
+    return jsonify({'message': 'Product deleted successfully'})
+
+
+#update order status
+@app.route('/updateOrderStatus/<int:order_id>', methods=['PUT'])
+def update_order_status(order_id):
+    data = request.get_json()
+    new_status = data.get('status')
+    print("new ",new_status)
+
+    order = Order.query.get(order_id)
+    if not order:
+        return jsonify({'error': 'Order not found'}), 404
+
+    order.status = new_status
+    db.session.commit()
+    
+    return jsonify({'message': 'Order status updated successfully'})
+
+
+def get_coordinates(city, country):
+    # Use a geocoding service to get coordinates for the city and country
+    response = requests.get(f"https://api.opencagedata.com/geocode/v1/json?q={city},{country}&key=5716cfd50622490e904c5ef2cfd9f601")
+    data = response.json()
+    if data['results']:
+        return data['results'][0]['geometry']['lng'], data['results'][0]['geometry']['lat']
+    return None, None
+
+@app.route('/client/geography', methods=['GET'])
+def get_geography():
+    users = User.query.all()
+    geojson_features = []
+
+    for user in users:
+        if user.city and user.country:
+            lng, lat = get_coordinates(user.city, user.country)
+            if lng and lat:
+                geojson_features.append({
+                    'type': 'Feature',
+                    'properties': {
+                        'name': f"{user.city}, {user.country}",
+                        'city': user.city,
+                        'country': user.country,
+                        'user_id': user.id
+                    },
+                    'geometry': {
+                        'type': 'Point',
+                        'coordinates': [lng, lat]
+                    }
+                })
+
+    response_data = {
+        'type': 'FeatureCollection',
+        'features': geojson_features
+    }
+
+    return jsonify(response_data)
+
+
+#category 
+@app.route('/getcategories', methods=['GET'])
+def get_categories():
+    categories = Category.query.all()
+    return jsonify([{
+        'id': category.id,
+        'parent': category.parent,
+        'type': category.type,
+        'img': category.img,
+        'products': category.products,
+        'children': category.children
+    } for category in categories])
+
+# Endpoint to delete a category by ID
+@app.route('/deletecategories/<int:id>', methods=['DELETE'])
+def delete_category(id):
+    category = Category.query.get_or_404(id)
+    db.session.delete(category)
+    db.session.commit()
+    return jsonify({'message': 'Category deleted successfully'})
+
+#add category
+@app.route('/addcategory', methods=['POST'])
+def add_category():
+    data = request.get_json()
+    new_category = Category(
+        parent=data['parent'],
+        type=data['type'],
+        img=data.get('img', 'default_image.jpg'),
+        products=data.get('products', []),
+        children=data.get('children', [])
+    )
+    db.session.add(new_category)
+    db.session.commit()
+    return jsonify({'message': 'Category added successfully'}), 201
+
+#update category
+@app.route('/updatecategory/<int:id>', methods=['PUT'])
+def update_category(id):
+    data = request.get_json()
+    category = Category.query.get_or_404(id)
+    category.parent = data.get('parent', category.parent)
+    category.type = data.get('type', category.type)
+    category.img = data.get('img', category.img)
+    category.products = data.get('products', category.products)
+    category.children = data.get('children', category.children)
+    db.session.commit()
+    return jsonify({'message': 'Category updated successfully'}), 200
+
+#coupon data
+@app.route('/getcoupons', methods=['GET'])
+def get_coupons_route():
+    coupons = Coupon.query.all()
+    return jsonify([coupon.serialize() for coupon in coupons])
+
+@app.route('/addcoupon', methods=['POST'])
+def add_coupon():
+    data = request.json
+    new_coupon = Coupon(
+        title=data['title'],
+        discount_percentage=data['discount_percentage'],
+        coupon_code=data['coupon_code'],
+        minimum_amount=data['minimum_amount'],
+        end_time=datetime.strptime(data['end_time'], '%Y-%m-%dT%H:%M'),
+        logo=data['logo']
+    )
+    db.session.add(new_coupon)
+    db.session.commit()
+    return jsonify({'message': 'Coupon added successfully'})
+
+@app.route('/updatecoupon/<int:id>', methods=['PUT'])
+def update_coupon(id):
+    coupon = Coupon.query.get(id)
+    if not coupon:
+        return jsonify({'error': 'Coupon not found'}), 404
+    
+    data = request.json
+    coupon.title = data['title']
+    coupon.discount_percentage = data['discount_percentage']
+    coupon.coupon_code = data['coupon_code']
+    coupon.minimum_amount = data['minimum_amount']
+
+    end_time_str = data['end_time']
+    try:
+        coupon.end_time = datetime.strptime(end_time_str, '%Y-%m-%dT%H:%M')
+    except ValueError:
+        try:
+            coupon.end_time = datetime.strptime(end_time_str, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return jsonify({'error': 'Invalid date format'}), 400
+
+    coupon.logo = data['logo']
+
+    db.session.commit()
+    return jsonify({'message': 'Coupon updated successfully'})
+
+@app.route('/deletecoupon/<int:id>', methods=['DELETE'])
+def delete_coupon(id):
+    coupon = Coupon.query.get(id)
+    if not coupon:
+        return jsonify({'error': 'Coupon not found'}), 404
+
+    db.session.delete(coupon)
+    db.session.commit()
+    return jsonify({'message': 'Coupon deleted successfully'})
+
+
+#review
+# Route to get all reviews
+@app.route('/getreviews', methods=['GET'])
+def get_reviews():
+    reviews = Review.query.all()
+    return jsonify([review.serialize() for review in reviews])
+
+# Route to delete a specific review by ID
+@app.route('/deletereviews/<int:id>', methods=['DELETE'])
+def delete_review(id):
+    review = Review.query.get(id)
+    if not review:
+        return jsonify({'error': 'Review not found'}), 404
+    
+    db.session.delete(review)
+    db.session.commit()
+    return jsonify({'message': 'Review deleted successfully'})
+
 @app.route('/')
 def index():
     return 'hello world'
