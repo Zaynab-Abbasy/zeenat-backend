@@ -7,6 +7,7 @@ from sqlalchemy import func,extract
 from flask_restful import Resource,Api
 from datetime import datetime, date
 import requests
+from geopy.geocoders import Nominatim
 
 import json
 
@@ -57,7 +58,19 @@ class User(db.Model):
     city = db.Column(db.String(255), nullable=True)
     country = db.Column(db.String(255), nullable=True)
 
+class Admin(db.Model):
+    __tablename__ = 'admins'
 
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(100), nullable=False, unique=True)
+    phoneNumber = db.Column(db.String(20), nullable=True)
+    country = db.Column(db.String(50), nullable=True)
+    occupation = db.Column(db.String(100), nullable=True)
+    role = db.Column(db.String(50), nullable=False)
+
+    def __repr__(self):
+        return f'<Admin {self.name}>'
 
 # Define Category model
 class Category(db.Model):
@@ -785,6 +798,17 @@ def get_dashboard_data():
         Order.created_at >= start_of_year
     ).scalar() or 0
 
+    # Get sales by category
+    orders = Order.query.all()
+    sales_by_category = {}
+    for order in orders:
+        cart_items = json.loads(order.cart)
+        for item in cart_items:
+            category = item['category']
+            sales_by_category[category] = sales_by_category.get(category, 0) + item['price'] * item['orderQuantity']
+
+    sales_by_category_data = [{"category": k, "totalSales": v} for k, v in sales_by_category.items()]
+
     # Get all transactions and format the data
     transactions = Order.query.all()
     transactions_data = [
@@ -807,12 +831,12 @@ def get_dashboard_data():
             "totalSales": monthly_sales
         },
         "yearlySalesTotal": yearly_sales,
+        "salesByCategory": sales_by_category_data,
         "transactions": transactions_data
     }
 
     # Return the data as a JSON response
     return jsonify(data)
-    
 
 
 
@@ -943,37 +967,28 @@ def get_coordinates(city, country):
         return data['results'][0]['geometry']['lng'], data['results'][0]['geometry']['lat']
     return None, None
 
+geolocator = Nominatim(user_agent="geoapiExercises")
+
 @app.route('/client/geography', methods=['GET'])
-def get_geography():
-    users = User.query.all()
-    geojson_features = []
+def get_usersgeo():
+    user_locations = []
+    users = User.query.all()  # Fetch all users from the database
 
     for user in users:
-        if user.city and user.country:
-            lng, lat = get_coordinates(user.city, user.country)
-            if lng and lat:
-                geojson_features.append({
-                    'type': 'Feature',
-                    'properties': {
-                        'name': f"{user.city}, {user.country}",
-                        'city': user.city,
-                        'country': user.country,
-                        'user_id': user.id
-                    },
-                    'geometry': {
-                        'type': 'Point',
-                        'coordinates': [lng, lat]
-                    }
-                })
-
-    response_data = {
-        'type': 'FeatureCollection',
-        'features': geojson_features
-    }
-
-    return jsonify(response_data)
-
-
+        location = geolocator.geocode(f"{user.city}, {user.country}")
+        if location:
+            user.latitude = location.latitude
+            user.longitude = location.longitude
+            user_locations.append({
+                'id': user.id,
+                'name': user.name,
+                'city': user.city,
+                'country': user.country,
+                'latitude': user.latitude,
+                'longitude': user.longitude
+            })
+    
+    return jsonify(user_locations)
 #category 
 @app.route('/getcategories', methods=['GET'])
 def get_categories():
@@ -1099,6 +1114,97 @@ def delete_review(id):
     db.session.commit()
     return jsonify({'message': 'Review deleted successfully'})
 
+#overview data
+@app.route('/sales/sales', methods=['GET'])
+def get_sales_data():
+    try:
+        # Fetch monthly sales data
+        monthly_data = db.session.query(
+            func.extract('month', Order.created_at).label('month'),
+            func.sum(Order.total_amount).label('totalSales')
+        ).group_by(func.extract('month', Order.created_at)).all()
+
+        formatted_monthly_data = [
+            {'month': month, 'totalSales': float(total_sales)}
+            for month, total_sales in monthly_data
+        ]
+
+        # Fetch daily sales data within a specified date range
+        start_date_str = request.args.get('startDate', str(datetime.now().date() - timedelta(days=30)))
+        end_date_str = request.args.get('endDate', str(datetime.now().date()))
+
+        start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+
+        daily_data = db.session.query(
+            func.date(Order.created_at).label('date'),
+            func.sum(Order.total_amount).label('totalSales')
+        ).filter(
+            Order.created_at >= start_date,
+            Order.created_at <= end_date
+        ).group_by(func.date(Order.created_at)).all()
+
+        formatted_daily_data = [
+            {'date': str(date), 'totalSales': float(total_sales)}
+            for date, total_sales in daily_data
+        ]
+
+        # Fetch yearly total sales
+        current_year = datetime.now().year
+        yearly_sales_total = db.session.query(
+            func.sum(Order.total_amount)
+        ).filter(
+            func.extract('year', Order.created_at) == current_year
+        ).scalar()
+
+        # Fetch sales by category
+        orders = Order.query.all()
+        sales_by_category = {}
+
+        for order in orders:
+            cart_items = json.loads(order.cart)
+            for item in cart_items:
+                category = item['category']  # Assuming each item has a 'category' key
+                sales_by_category[category] = sales_by_category.get(category, 0) + item['price'] * item['orderQuantity']  # Assuming each item has 'price' and 'quantity' keys
+
+        formatted_sales_by_category = {
+            category: float(total_sales)
+            for category, total_sales in sales_by_category.items()
+        }
+
+        return jsonify({
+            'monthlyData': formatted_monthly_data,
+            'dailyData': formatted_daily_data,
+            'yearlySalesTotal': float(yearly_sales_total),
+            'salesByCategory': formatted_sales_by_category
+        }), 200
+
+
+    except Exception as e:
+        # Log the error for debugging purposes
+        app.logger.error(f"Error fetching monthly sales data: {str(e)}")
+        return jsonify({'error': 'An error occurred while fetching data'}), 500
+    
+    
+    
+    
+#admin list 
+@app.route('/admins', methods=['GET'])
+def get_admins():
+    admins = Admin.query.all()
+    admins_list = [{
+        "_id": admin.id,
+        "name": admin.name,
+        "email": admin.email,
+        "phoneNumber": admin.phoneNumber,
+        "country": admin.country,
+        "occupation": admin.occupation,
+        "role": admin.role
+    } for admin in admins]
+    return jsonify(admins_list)
+
+if __name__ == '__main__':
+    app.run(debug=True)
 @app.route('/')
 def index():
     return 'hello world'
