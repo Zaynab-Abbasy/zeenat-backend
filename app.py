@@ -92,6 +92,7 @@ class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     img = db.Column(db.String(255))
     category_id = db.Column(db.Integer, db.ForeignKey('category.id'))
+    subcategory_name = db.Column(db.String(100), nullable=True)
     title = db.Column(db.String(255))
     description = db.Column(db.Text)
     imageURLs = db.Column(db.Text)
@@ -168,7 +169,18 @@ class Order(db.Model):
     def __repr__(self):
         return f"Order('{self.name}', '{self.email}')" 
 
-     
+
+class Contact(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(255), nullable=False)
+    email = db.Column(db.String(255), nullable=False)
+    subject = db.Column(db.String(255), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    remember = db.Column(db.Boolean, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def __repr__(self):
+        return f'<Contact {self.name}>'     
     
     
 # Signup endpoint
@@ -303,17 +315,26 @@ def get_all_products():
 
     if category_name:
         if subcategory_name:
+            print(f"Filtering by category '{category_name}' and subcategory '{subcategory_name}'")
             # Filter products based on the category and subcategory
             products = Product.query.join(Category).filter(
                 Category.parent == category_name,
-                Category.children.contains([subcategory_name])
+                Product.subcategory_name == subcategory_name
             ).all()
         else:
+            print(f"Filtering by category '{category_name}'")
             # Filter products based on the category only
             products = Product.query.join(Category).filter(
                 Category.parent == category_name
             ).all()
+    elif subcategory_name:
+        print(f"Filtering by subcategory '{subcategory_name}'")
+        # Filter products based on the subcategory only
+        products = Product.query.filter(
+            Product.subcategory_name == subcategory_name
+        ).all()
     else:
+        print("No category or subcategory filter provided, retrieving all products")
         # If no category is specified, retrieve all products
         products = Product.query.all()
 
@@ -327,6 +348,7 @@ def get_all_products():
             'id': product.id,
             'img': product.img,
             'category': product.category.parent if product.category else None,
+            'subcategory_name': product.subcategory_name,
             'title': product.title,
             'price': product.price,
             'discount': product.discount,
@@ -339,29 +361,28 @@ def get_all_products():
         
         # Apply color filtering if color_filter is provided
         if color_filter:
+            print(f"Applying color filter '{color_filter}'")
             # Filter products based on the color provided
-            products = [
-                product for product in products if any(
-                    img_data.get('color', {}).get('name', '').lower() == color_filter.lower()
-                    for img_data in json.loads(product.imageURLs)
-                )
+            filtered_images = [
+                img_data for img_data in json.loads(product.imageURLs)
+                if img_data.get('color', {}).get('name', '').lower() == color_filter.lower()
             ]
-            print('Filtered Products:', products)
-
+            if not filtered_images:
+                continue
+            serialized_product['colors'] = [img_data['color'] for img_data in filtered_images]
+        
         # Remove duplicate colors
         unique_colors = []
         for color in serialized_product['colors']:
             if color not in unique_colors:
                 unique_colors.append(color)
         serialized_product['colors'] = unique_colors
-        print('Serialized Products:', serialized_products)
+        
+        print('Serialized Product:', serialized_product)
         # Append the serialized product to the list
         serialized_products.append(serialized_product)
         
     return jsonify({'data': serialized_products})
-
-
-
 
 
 
@@ -1203,8 +1224,80 @@ def get_admins():
     } for admin in admins]
     return jsonify(admins_list)
 
-if __name__ == '__main__':
-    app.run(debug=True)
+
+
+#compare products
+@app.route('/compare-products', methods=['POST'])
+def compare_products():
+    data = request.json
+    product_ids = data.get('productIds', [])
+
+    compared_products = []
+    for product_id in product_ids:
+        product = Product.query.get(product_id)
+        if product:
+            compared_products.append({
+                'id': product.id,
+                'title': product.title,
+                'description': product.description,
+                'price': product.price,
+                'discount': product.discount,
+                'status': product.status,
+                'tags': product.tags,
+                'type': product.type,
+                'quantity': product.quantity,
+                'img': product.img,
+                'category_id': product.category_id,
+                'subcategory_name': product.subcategory_name,
+                'imageURLs': product.imageURLs
+                # Add more fields as needed
+            })
+
+    return jsonify({'data':compared_products})
+
+
+@app.route('/trackorder', methods=['GET'])
+def track_order():
+    order_id = request.args.get('orderId')
+    if not order_id:
+        return jsonify({'message': 'Order ID is required'}), 400
+
+    order = Order.query.filter_by(id=order_id).first()
+    if not order:
+        return jsonify({'message': 'Order not found'}), 404
+
+    order_details = {
+        'id': order.id,
+        'name': order.name,
+        'email': order.email,
+        'status': order.status,
+        'items': order.cart.split(','),  # Assuming cart is stored as a comma-separated string
+        'total_amount': order.total_amount,
+        'created_at': order.created_at
+    }
+
+    return jsonify(order_details), 200
+
+#contact form 
+# Route to handle form submission
+@app.route('/submit-form', methods=['POST'])
+def submit_form():
+    data = request.json
+
+    new_contact = Contact(
+        name=data['name'],
+        email=data['email'],
+        subject=data['subject'],
+        message=data['message'],
+        remember=data['remember']
+    )
+
+    db.session.add(new_contact)
+    db.session.commit()
+
+    return jsonify({'message': 'Form submitted successfully'}), 201
+
+
 @app.route('/')
 def index():
     return 'hello world'
